@@ -1,0 +1,108 @@
+name: Monthly Render Farm
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Batch folder on the share, e.g. August_2026"
+        required: true
+        default: "August_2026"
+      only:
+        description: "Optional filter, e.g. 'Marathi' or 'Marathi/Aries'. Blank = everything in the manifest."
+        required: false
+        default: ""
+      upload:
+        description: "Upload to YouTube after rendering"
+        type: boolean
+        required: false
+        default: false
+      privacy:
+        description: "YouTube privacy: private | unlisted | public"
+        required: false
+        default: "private"
+
+env:
+  STORAGE: bdnewsstf74efd27
+  SHARE: monthly-render
+  JOB: ${{ github.event.inputs.job_id }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      count: ${{ steps.gen.outputs.count }}
+    steps:
+      - name: Fetch manifest
+        run: |
+          az storage file download --account-name "$STORAGE" \
+            --sas-token "${{ secrets.AZURE_SAS }}" -s "$SHARE" \
+            -p "$JOB/manifest.json" --dest manifest.json -o none
+      - id: gen
+        env:
+          ONLY: ${{ github.event.inputs.only }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          items = json.load(open('manifest.json'))['items']
+          only = os.environ.get('ONLY','').strip()
+          if only:
+              items = [i for i in items if i == only or i.startswith(only + '/')]
+          if not items:
+              raise SystemExit(f"No items matched filter {only!r}")
+          out = {"include": [{"item": i, "safe": i.replace('/', '-')} for i in items]}
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write("matrix=" + json.dumps(out) + "\n")
+              f.write(f"count={len(items)}\n")
+          print(f"{len(items)} items queued")
+          for i in items: print("  -", i)
+          PY
+
+  render:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350          # under the 360 hard cap, so we fail cleanly
+    strategy:
+      fail-fast: false            # one bad sign never kills the batch
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg + python deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          pip install -q "moviepy==1.0.3" "imageio-ffmpeg" "pillow" "numpy" \
+                         "google-api-python-client" "google-auth-oauthlib" "google-auth-httplib2"
+
+      - name: Render, stitch and upload
+        env:
+          STORAGE: ${{ env.STORAGE }}
+          SHARE: ${{ env.SHARE }}
+          AZURE_SAS: ${{ secrets.AZURE_SAS }}
+          DO_UPLOAD: ${{ github.event.inputs.upload }}
+          PRIVACY: ${{ github.event.inputs.privacy }}
+        run: bash process.sh "${{ matrix.item }}" "$JOB"
+
+      - name: Save logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-${{ matrix.safe }}
+          path: |
+            upload_result.json
+            monthly/output/**/clips_16_9/*.mp4
+          retention-days: 3
+          if-no-files-found: ignore
+
+  summary:
+    needs: [plan, render]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "### Monthly render farm" >> $GITHUB_STEP_SUMMARY
+          echo "Job: \`$JOB\` — ${{ needs.plan.outputs.count }} items queued" >> $GITHUB_STEP_SUMMARY
+          echo "Render result: **${{ needs.render.result }}**" >> $GITHUB_STEP_SUMMARY
+          echo "Outputs land on the Azure share under \`$JOB/outputs/<Language>/\`." >> $GITHUB_STEP_SUMMARY
