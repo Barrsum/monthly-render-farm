@@ -35,18 +35,29 @@ say "Fetching audio + pre-rendered text for $SIGN"
 mkdir -p "monthly/output/$JOB/$LANG_NAME/audio" "monthly/output/$JOB/$LANG_NAME/text" \
          "monthly/output/$JOB/$LANG_NAME/clips_16_9" "monthly/input/$JOB/$LANG_NAME"
 
+# NOTE: --dest must be an EXISTING DIRECTORY. Different az versions disagree
+# about whether a --dest that looks like a file path is a file or a directory
+# (the runner's build resolved "x.json" to "x.json/x.json"). Passing a directory
+# that already exists is unambiguous everywhere, and az keeps the basename.
 fetch() { az storage file download "${AZ[@]}" -p "$1" --dest "$2" -o none; }
 
-fetch "$JOB/data/$LANG_NAME/audio/$SIGN.wav"    "monthly/output/$JOB/$LANG_NAME/audio/$SIGN.wav"
-fetch "$JOB/data/$LANG_NAME/audio/Plug.wav"     "monthly/output/$JOB/$LANG_NAME/audio/Plug.wav"
-fetch "$JOB/data/$LANG_NAME/text/$SIGN.png"     "monthly/output/$JOB/$LANG_NAME/text/$SIGN.png"
-fetch "$JOB/data/$LANG_NAME/text/$SIGN.json"    "monthly/output/$JOB/$LANG_NAME/text/$SIGN.json"
-fetch "$JOB/data/$LANG_NAME/text/_Header.png"   "monthly/output/$JOB/$LANG_NAME/text/_Header.png"
-fetch "$JOB/data/$LANG_NAME/text/_Header.json"  "monthly/output/$JOB/$LANG_NAME/text/_Header.json"
-# DS text is only needed as a fallback; the pre-rendered PNG is authoritative.
-fetch "$JOB/data/$LANG_NAME/${SIGN}_DS.txt"     "monthly/input/$JOB/$LANG_NAME/${SIGN}_DS.txt" || true
+AUD="monthly/output/$JOB/$LANG_NAME/audio"
+TXT="monthly/output/$JOB/$LANG_NAME/text"
+CLIPS="monthly/output/$JOB/$LANG_NAME/clips_16_9"
+INP="monthly/input/$JOB/$LANG_NAME"
+
+fetch "$JOB/data/$LANG_NAME/audio/$SIGN.wav"    "$AUD"
+fetch "$JOB/data/$LANG_NAME/audio/Plug.wav"     "$AUD"
+fetch "$JOB/data/$LANG_NAME/text/$SIGN.png"     "$TXT"
+fetch "$JOB/data/$LANG_NAME/text/$SIGN.json"    "$TXT"
+fetch "$JOB/data/$LANG_NAME/text/_Header.png"   "$TXT"
+fetch "$JOB/data/$LANG_NAME/text/_Header.json"  "$TXT"
+# DS text is only a fallback; the pre-rendered PNG is authoritative.
+fetch "$JOB/data/$LANG_NAME/${SIGN}_DS.txt"     "$INP" || true
 # The shared outro clip was rendered locally - no need to rebuild it here.
-fetch "$JOB/data/$LANG_NAME/ZZ_Outro_16_9.mp4"  "monthly/output/$JOB/$LANG_NAME/clips_16_9/ZZ_Outro_16_9.mp4"
+fetch "$JOB/data/$LANG_NAME/ZZ_Outro_16_9.mp4"  "$CLIPS"
+
+echo "--- fetched ---"; ls -lh "$AUD" "$TXT" "$CLIPS"
 end
 
 # ------------------------------------------------------------------- render
@@ -68,14 +79,11 @@ ls -lh "$FINAL"
 # ------------------------------------------------------------------- upload
 if [ "${DO_UPLOAD:-false}" = "true" ]; then
   say "Uploading to YouTube"
-  mkdir -p tokens
-  az storage file download "${AZ[@]}" -p "$JOB/secrets/token_${LANG_NAME,,}.json" \
-     --dest "tokens/token_${LANG_NAME,,}.json" -o none
-  az storage file download "${AZ[@]}" -p "$JOB/secrets/client_secret.json" \
-     --dest "client_secret.json" -o none
-  az storage file download "${AZ[@]}" -p "$JOB/data/$LANG_NAME/metadata/$SIGN.json" \
-     --dest "metadata.json" -o none
-  python code/upload_youtube.py "$LANG_NAME" "$SIGN" "$FINAL" metadata.json
+  mkdir -p tokens meta
+  fetch "$JOB/secrets/token_${LANG_NAME,,}.json" tokens
+  fetch "$JOB/secrets/client_secret.json"        .
+  fetch "$JOB/data/$LANG_NAME/metadata/$SIGN.json" meta
+  python code/upload_youtube.py "$LANG_NAME" "$SIGN" "$FINAL" "meta/$SIGN.json"
   end
 else
   echo "DO_UPLOAD not true - skipping YouTube upload"

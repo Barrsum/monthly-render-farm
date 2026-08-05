@@ -34,10 +34,13 @@ jobs:
       count: ${{ steps.gen.outputs.count }}
     steps:
       - name: Fetch manifest
+        # --dest must be an existing DIRECTORY; some az builds resolve a
+        # file-looking --dest to "<dest>/<basename>". "." is unambiguous.
         run: |
           az storage file download --account-name "$STORAGE" \
             --sas-token "${{ secrets.AZURE_SAS }}" -s "$SHARE" \
-            -p "$JOB/manifest.json" --dest manifest.json -o none
+            -p "$JOB/manifest.json" --dest . -o none
+          ls -l manifest.json
       - id: gen
         env:
           ONLY: ${{ github.event.inputs.only }}
