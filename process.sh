@@ -76,25 +76,61 @@ if [ ! -f "$FINAL" ]; then
 fi
 ls -lh "$FINAL"
 
+# --------------------------------------------------------- push result FIRST
+# The rendered MP4 goes to the share BEFORE any upload attempt. YouTube's API
+# allows only ~6 uploads/day per project, so most of a 48-video batch will hit
+# quota-exceeded. Uploading first would mean `set -e` killed the job and threw
+# away a video that took an hour to render.
+say "Pushing finished video to the share"
+mkdir -p outbox
+cp "$FINAL" "outbox/$(basename "$FINAL")"
+az storage file upload-batch --account-name "$STORAGE" --sas-token "$AZURE_SAS" \
+  --destination "$SHARE" --destination-path "$JOB/outputs/$LANG_NAME" --source outbox -o none
+echo "video is safe on the share regardless of what the upload does"
+end
+
 # ------------------------------------------------------------------- upload
+UPLOAD_STATUS="skipped"
 if [ "${DO_UPLOAD:-false}" = "true" ]; then
   say "Uploading to YouTube"
   mkdir -p tokens meta
   fetch "$JOB/secrets/token_${LANG_NAME,,}.json" tokens
   fetch "$JOB/secrets/client_secret.json"        .
   fetch "$JOB/data/$LANG_NAME/metadata/$SIGN.json" meta
-  python code/upload_youtube.py "$LANG_NAME" "$SIGN" "$FINAL" "meta/$SIGN.json"
+
+  # Non-fatal on purpose: a quota rejection must not fail the job or lose work.
+  set +e
+  python code/upload_youtube.py "$LANG_NAME" "$SIGN" "$FINAL" "meta/$SIGN.json" 2>&1 | tee upload.log
+  UP_RC=${PIPESTATUS[0]}
+  set -e
+
+  if [ "$UP_RC" -eq 0 ]; then
+    UPLOAD_STATUS="uploaded"
+    echo "✅ uploaded $ITEM"
+  elif grep -qiE "quotaExceeded|uploadLimitExceeded|exceeded your.*quota" upload.log; then
+    UPLOAD_STATUS="quota_exceeded"
+    echo "::warning::QUOTA EXCEEDED for $ITEM — video is on the share, retry the upload later"
+  else
+    UPLOAD_STATUS="failed"
+    echo "::warning::upload failed for $ITEM (rc=$UP_RC) — video is on the share"
+    tail -20 upload.log || true
+  fi
   end
 else
   echo "DO_UPLOAD not true - skipping YouTube upload"
 fi
 
-# --------------------------------------------------------- push result back
-say "Pushing finished video to the share"
-mkdir -p outbox
-cp "$FINAL" "outbox/$(basename "$FINAL")"
+# ------------------------------------------------- record what happened
+say "Recording upload status"
+mkdir -p status
+VID=""
+[ -f upload_result.json ] && VID=$(python -c "import json;print(json.load(open('upload_result.json')).get('video_id',''))" 2>/dev/null || echo "")
+cat > "status/${LANG_NAME}_${SIGN}.json" <<EOF
+{"item":"$ITEM","status":"$UPLOAD_STATUS","video_id":"$VID","rendered":true}
+EOF
+cat "status/${LANG_NAME}_${SIGN}.json"
 az storage file upload-batch --account-name "$STORAGE" --sas-token "$AZURE_SAS" \
-  --destination "$SHARE" --destination-path "$JOB/outputs/$LANG_NAME" --source outbox -o none
+  --destination "$SHARE" --destination-path "$JOB/status" --source status -o none
 end
 
 echo "=== done $ITEM in $(( ($(date +%s) - START) / 60 )) min ==="

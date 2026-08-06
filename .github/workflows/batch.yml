@@ -67,7 +67,7 @@ jobs:
     timeout-minutes: 350          # under the 360 hard cap, so we fail cleanly
     strategy:
       fail-fast: false            # one bad sign never kills the batch
-      max-parallel: 20
+      max-parallel: 40
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
