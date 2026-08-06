@@ -31,6 +31,10 @@ fetch "$JOB/data/$LANG_NAME/text/$SIGN.png"    "$TXT"
 fetch "$JOB/data/$LANG_NAME/text/$SIGN.json"   "$TXT"
 fetch "$JOB/data/$LANG_NAME/text/_Header.png"  "$TXT"
 fetch "$JOB/data/$LANG_NAME/text/_Header.json" "$TXT"
+# monthly_video_generator validates the DS source exists even when it renders
+# from the pre-rendered PNG, so the moviepy baseline needs it too.
+mkdir -p "monthly/input/$JOB/$LANG_NAME"
+fetch "$JOB/data/$LANG_NAME/${SIGN}_DS.txt" "monthly/input/$JOB/$LANG_NAME"
 cp code/*.py monthly/ 2>/dev/null || true
 mkdir -p hyperframe-test && cp code/render_ffmpeg.py code/make_composition.py hyperframe-test/ 2>/dev/null || true
 echo "::endgroup::"
