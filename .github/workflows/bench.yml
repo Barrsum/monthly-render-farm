@@ -1,0 +1,100 @@
+name: Renderer Benchmark
+
+# Runs the SAME sign through moviepy / ffmpeg / hyperframes as parallel matrix
+# jobs so the three can be compared on identical hardware. Never uploads to
+# YouTube - results land on the Azure share under <job_id>/bench/<renderer>/.
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Batch folder on the share"
+        required: true
+        default: "August_2026"
+      item:
+        description: "Language/Sign to benchmark"
+        required: true
+        default: "Marathi/Aries"
+      seconds:
+        description: "Seconds of the sign to render (180 = 3 min slice)"
+        required: true
+        default: "180"
+      renderers:
+        description: "Comma-separated: ffmpeg,hyperframes,moviepy"
+        required: true
+        default: "ffmpeg,hyperframes,moviepy"
+
+env:
+  STORAGE: bdnewsstf74efd27
+  SHARE: monthly-render
+  JOB: ${{ github.event.inputs.job_id }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        env:
+          RENDERERS: ${{ github.event.inputs.renderers }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          rs = [r.strip() for r in os.environ['RENDERERS'].split(',') if r.strip()]
+          out = {"include": [{"renderer": r} for r in rs]}
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write("matrix=" + json.dumps(out) + "\n")
+          print("benchmarking:", rs)
+          PY
+
+  bench:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false          # one renderer failing must not hide the others
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        if: matrix.renderer == 'hyperframes'
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          pip install -q "moviepy==1.0.3" imageio-ffmpeg pillow numpy
+
+      - name: Benchmark ${{ matrix.renderer }}
+        env:
+          STORAGE: ${{ env.STORAGE }}
+          SHARE: ${{ env.SHARE }}
+          AZURE_SAS: ${{ secrets.AZURE_SAS }}
+        run: |
+          bash bench.sh "${{ github.event.inputs.item }}" "$JOB" \
+               "${{ matrix.renderer }}" "${{ github.event.inputs.seconds }}"
+
+      - name: Upload result as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.renderer }}
+          path: bench_out/
+          retention-days: 5
+          if-no-files-found: warn
+
+  summary:
+    needs: [plan, bench]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "### Renderer benchmark — \`$JOB\`" >> $GITHUB_STEP_SUMMARY
+          echo "Item: \`${{ github.event.inputs.item }}\` · ${{ github.event.inputs.seconds }}s slice" >> $GITHUB_STEP_SUMMARY
+          echo "Result: **${{ needs.bench.result }}**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Outputs: \`$JOB/bench/<renderer>/\` on the share, and as run artifacts." >> $GITHUB_STEP_SUMMARY
